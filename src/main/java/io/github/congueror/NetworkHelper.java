@@ -5,13 +5,25 @@ import java.io.InputStreamReader;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 public class NetworkHelper {
 
+    public static CompletableFuture<Void> listenCallbackAsync(int port, Consumer<BufferedReader> task) {
+        return CompletableFuture.runAsync(() -> {
+            try (ServerSocket ss = new ServerSocket(port, 1, InetAddress.getByName("127.0.0.1"))) {
+                Socket s = ss.accept();//establishes connection
+                var rawIn = s.getInputStream();
+                BufferedReader in = new BufferedReader(new InputStreamReader(rawIn, StandardCharsets.US_ASCII));
 
-    public static CompletableFuture<String> listenCallbackAsync(int port) {
-        return null;
+                task.accept(in);
+
+                s.close();
+            } catch (Exception e) {
+                System.out.println(e);
+            }
+        });
     }
 
     public static CompletableFuture<String> listenCallback(int port, Predicate<String> filter) {

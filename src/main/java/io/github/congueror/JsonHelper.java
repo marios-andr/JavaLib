@@ -34,12 +34,18 @@ public class JsonHelper {
     }
 
     public static void saveToFile(JsonObject jsonObject, Path path) {
+        try {
+            Files.createDirectories(path.getParent());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
         try (FileWriter fileWriter = new FileWriter(path.toFile())) {
-            JsonWriter jsonWriter = GSON.newJsonWriter(Streams.writerForAppendable(fileWriter));
+            JsonWriter jsonWriter = GSON.newJsonWriter(fileWriter);
             jsonWriter.setIndent("   ");
             GSON.toJson(jsonObject, jsonWriter);
         } catch (Exception e) {
-            System.out.println("Something went wrong while saving JSON file: " + e.getMessage());
+            System.out.println("Something went wrong while saving JSON file");
             e.printStackTrace();
         }
     }

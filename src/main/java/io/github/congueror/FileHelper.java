@@ -1,7 +1,9 @@
 package io.github.congueror;
 
 import java.io.*;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -50,5 +52,14 @@ public class FileHelper {
         }
 
         return Path.of(tempFile.getPath());
+    }
+
+    public static Path extractResourceFile(String fileName, Path outputFolder) throws IOException {
+        InputStream file = FileHelper.class.getClassLoader().getResourceAsStream(fileName);
+        if (file == null)
+            return null;
+        Files.createDirectories(outputFolder);
+        Files.copy(file, outputFolder.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+        return outputFolder.resolve(fileName);
     }
 }

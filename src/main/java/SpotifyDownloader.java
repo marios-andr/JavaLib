@@ -6,73 +6,92 @@ import io.github.congueror.spotify.SpotifyApi;
 import io.github.congueror.spotify.objects.Track;
 
 import java.io.*;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.nio.file.InvalidPathException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Scanner;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.ZipFile;
+import java.util.function.Predicate;
 
 public class SpotifyDownloader {
+    private final Path outputPath;
+    private final SpotifyApi sp;
+    private final Path tracksPath;
+    private final JsonObject tracksJson;
 
-    public static void main(String[] args) {
-        Scanner scanner = new Scanner(System.in);
+    public SpotifyDownloader(Path outputPath, Path settingsPath) {
+        this.outputPath = outputPath;
+        this.tracksPath = outputPath.resolve("tracks.json");
 
-        System.out.println("Download Location (Relative to the current directory): ");
-        Path output = null;
-        while (output == null) {
-            try {
-                output = Paths.get(scanner.nextLine());
-            } catch (InvalidPathException e) {
-                System.out.println("The path is invalid. Try again.");
-            }
-        }
-
-        JsonObject obj = JsonHelper.readFromFile(Path.of("./settings.json"));
+        JsonObject obj = JsonHelper.readFromFile(settingsPath);
         if (!obj.has("clientId")) {
-            System.out.println("No client ID was found in settings.json. The program will exit.");
-            return;
+            obj.addProperty("clientId", "HERE");
+            JsonHelper.saveToFile(obj, settingsPath);
+            throw new IllegalStateException("Missing field: clientId in " + settingsPath);
         }
         String clientId = obj.get("clientId").getAsString();
-        SpotifyApi sp = new SpotifyApi(clientId);
+        sp = new SpotifyApi(clientId);
         sp.awaitReady();
 
-        List<Track> tracks = sp.getUserSavedTracks();
-
-        System.out.println("Found " + tracks.size() + " tracks that are not present in the given directory: ");
-        for (Track track : tracks) {
-            System.out.println(track.getName());
-        }
-        System.out.println("Would you like to download these tracks? (y/n)");
-        String answer = scanner.next().toLowerCase();
-        if (answer.equals("y")) {
-            startTrackDownload(output, tracks);
-        }
+        tracksJson = JsonHelper.readFromFile(tracksPath);
     }
 
-    private static void startTrackDownload(Path outputPath, List<Track> tracks) {
+    public CompletableFuture<Void> start(Predicate<List<Track>> shouldStart) {
+        List<Track> tracks = sp.getUserSavedTracks();
+        List<String> savedTracks = getSavedTracks();
+
+        List<Track> notSavedTracks = new ArrayList<>();
+        for (Track t : tracks) {
+            if (!savedTracks.contains(t.getId()))
+                notSavedTracks.add(t);
+        }
+
+        final List<Track> finalTracks = Collections.unmodifiableList(notSavedTracks);
+        if (!shouldStart.test(finalTracks))
+            return null;
+
+        return CompletableFuture.runAsync(() -> this.startTrackDownload(finalTracks)).thenRun(() -> {
+            JsonHelper.saveToFile(this.tracksJson, tracksPath);
+        });
+    }
+
+    private List<String> getSavedTracks() {
+        if (!tracksJson.has("tracks") || !tracksJson.get("tracks").isJsonObject()) {
+            tracksJson.remove("tracks");
+            tracksJson.add("tracks", new JsonObject());
+            JsonHelper.saveToFile(tracksJson, tracksPath);
+            return Collections.emptyList();
+        }
+
+        List<String> tracks = new ArrayList<>();
+        JsonObject trsjhsdf = tracksJson.getAsJsonObject("tracks");
+        for (String key : trsjhsdf.keySet()) {
+            Path p = Path.of(trsjhsdf.get(key).getAsString());
+            if (Files.exists(p))
+                tracks.add(key);
+        }
+        return tracks;
+    }
+
+    private void startTrackDownload(List<Track> tracks) {
         Path exe;
         try {
-            exe = extractExe(outputPath);
+            exe = FileHelper.extractResourceFile("yt-dlp.exe", outputPath);
         } catch (Exception e) {
             System.out.println("Something went wrong while extracting yt-dlp.exe .");
             e.printStackTrace();
             return;
         }
 
-        File outDir = outputPath.toFile();
-        outDir.mkdirs();
-
         File exeFile = exe.toFile();
+        exeFile.deleteOnExit();
 
         try (FileWriter fw = FileHelper.writeTempFile(outputPath)) {
             for (Track track : tracks) {
                 String trackName = track.getName() + " by " + track.getArtist() + " sound";
-                fw.write("ytsearch1:"+trackName+"\n");
+                fw.write("ytsearch1:" + trackName + "\n");
             }
 
         } catch (Exception e) {
@@ -86,15 +105,18 @@ public class SpotifyDownloader {
             System.out.println("Something went wrong while updating yt-dlp.exe .");
         }
 
+        //String curl = encodedCurl(outputPath, "http://localhost:8080?filepath=\\\"%(filepath)s\\\"");
+        String curl = encodedCurl(outputPath, "%(filepath)s");
         ProcessBuilder pb = new ProcessBuilder(exeFile.getPath(),
                 "--batch-file", outputPath.resolve("temp.txt").toString(),
                 "-P", outputPath.toString(),
                 "-o", "%(title)s.%(ext)s",
                 "-f", "140",
-                "--exec", "curl http://localhost:8080?filepath=%(filepath)s"
+                "--exec", curl
         );
 
         try {
+            startListener(tracks);
             Process process = pb.start();
             InputStream is = process.getInputStream();
             InputStreamReader isr = new InputStreamReader(is);
@@ -109,44 +131,84 @@ public class SpotifyDownloader {
         }
     }
 
-    private static Path extractExe(Path outputFolder) throws URISyntaxException, IOException {
-        URI jar = SpotifyDownloader.class.getProtectionDomain().getCodeSource().getLocation().toURI();
-        String fileName = "yt-dlp.exe";
-        File loc = new File(jar);
-        Path filePath;
-        if (loc.isDirectory())
-            filePath = Paths.get(jar).resolve(fileName);
-        else {
-            try (ZipFile zipFile = new ZipFile(loc)) {
-                filePath = FileHelper.extractFile(zipFile, fileName, outputFolder);
-                filePath.toFile().deleteOnExit();
+    private void saveTrack(String filepath, Track track) {
+        tracksJson.getAsJsonObject("tracks").addProperty(track.getId(), filepath);
+    }
+
+    private void startListener(List<Track> tracks) {
+        NetworkHelper.listenCallbackAsync(8080, (in) -> {
+            try {
+                int counter = 0;
+                do {
+                    String cmd = in.readLine();
+                    if (cmd == null) return; //client is hung up
+                    cmd = cmd.trim();
+
+                    if (cmd.startsWith("GET")) {
+                        String path = NetworkHelper.getURLQueryParam(NetworkHelper.trimGetRequest(cmd), "filepath");
+                        if (path != null) {
+                            saveTrack(path, tracks.get(counter++));
+                        }
+                    }
+                } while (counter != tracks.size());
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    private static String encodedCurl(Path outputFolder, String url) {
+        boolean isWin = System.getProperty("os.name").toLowerCase().contains("windows");
+        Path script;
+        try {
+            if (isWin) {
+                script = FileHelper.extractResourceFile("encoded-curl.ps1", outputFolder);
+                outputFolder.resolve("encoded-curl.ps1").toFile().deleteOnExit();
+                return "powershell.exe -executionpolicy bypass -file \\\"" + script.toAbsolutePath() + "\\\" \\\"" + url + "\\\"";
+            } else {
+                script = FileHelper.extractResourceFile("encoded-curl.sh", outputFolder);//TODO: Android/Unix compat
+            }
+        } catch (Exception e) {
+            System.out.println("Something went wrong while extracting encoded-url script.");
+            System.out.println(e);
+            return null;
+        }
+        if (script == null)
+            return null;
+        return "&\\\"" + script.toAbsolutePath() + "\\\" \\\"" + url + "\\\"";
+    }
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+
+        System.out.println("Download Location (Relative to the current directory): ");
+        Path output = null;
+        while (output == null) {
+            try {
+                output = Paths.get(scanner.nextLine());
+                //if (!output.toFile().isDirectory()) {
+                //    output = null;
+                //    throw new RuntimeException();
+                //}
+            } catch (RuntimeException e) {
+                System.out.println("The path is invalid. Try again.");
             }
         }
 
-        return filePath;
-    }
-
-    private static void applyMetadata(String filepath, Track track) {
-        //Ignore for now
-    }
-
-    private static void startListener(List<Track> tracks) {
-        AtomicInteger counter = new AtomicInteger();
-        var future = nextListener(counter, tracks);
-    }
-
-    private static CompletableFuture<String> nextListener(AtomicInteger counter, List<Track> tracks) {
-        if (counter.get() >= tracks.size()) {
-            System.out.println("All tracks processed. Stopping listener.");
-            return CompletableFuture.completedFuture(null); // Exit condition
-        }
-
-        return NetworkHelper.listenCallback(8080, s -> s.startsWith("GET"))
-                .thenCompose(s -> {
-                    var next = nextListener(counter, tracks);
-                    String filepath = NetworkHelper.getURLQueryParam(NetworkHelper.trimGetRequest(s), "filepath");
-                    applyMetadata(filepath, tracks.get(counter.getAndIncrement()));
-                    return next;
-                });
+        Path settingsPath = Path.of("./settings.json");
+        SpotifyDownloader sd = new SpotifyDownloader(output, settingsPath);
+        CompletableFuture<Void> download = sd.start(tracks -> {
+            System.out.println("Found " + tracks.size() + " tracks that are not present in the given directory: ");
+            for (Track track : tracks) {
+                System.out.println(track.getName());
+            }
+            System.out.println("Would you like to download these tracks? (y/n)");
+            String answer = scanner.next().toLowerCase();
+            if (answer.equals("y")) {
+                return true;
+            }
+            return false;
+        });
+        download.join();
     }
 }

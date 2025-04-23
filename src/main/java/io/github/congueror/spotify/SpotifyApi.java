@@ -224,16 +224,31 @@ public class SpotifyApi {
         return savedTracks;
     }
 
+    public List<Track> getPlaylistTracks(String playlistId) {
+        List<Track> savedTracks = new ArrayList<>();
+        String next = "playlists/" + playlistId + "/tracks?limit=50&offset=0";
 
+        do {
+            var a = getRequest(next);
+            JsonObject obj = a.join();
+            if (obj.get("status").getAsInt() != 200) {
+                break;
+            }
 
-    public static void main(String[] args) {
-        SpotifyApi app = new SpotifyApi("4187b1d85b184229812fc3933a5a0ffd");
-        app.awaitReady();
-        var a = app.getUserSavedTracks();
-        System.out.println("Found: " + a.size());
-        for (Track track : a) {
-            System.out.println(track);
-        }
-        //JsonHelper.saveToFile(obj, Path.of("./test.json"));
+            if (!obj.get("next").isJsonNull()) {
+                next = obj.get("next").getAsString();
+                next = next.substring(SPOTIFY_API.length());
+            } else
+                next = null;
+
+            JsonArray tracks = obj.get("items").getAsJsonArray();
+            for (JsonElement track : tracks) {
+                JsonObject trackObj = track.getAsJsonObject().getAsJsonObject("track");
+                savedTracks.add(Track.of(trackObj));
+            }
+
+        } while (next != null);
+
+        return savedTracks;
     }
 }
